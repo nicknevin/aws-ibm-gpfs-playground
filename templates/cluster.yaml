@@ -5,7 +5,7 @@ metadata:
 spec:
   pmcollector:
     nodeSelector:
-      scale.spectrum.ibm.com/daemon-selector: ""
+      scale.spectrum.ibm.com/role: storage
   daemon:
     nsdDevicesConfig:
       bypassDiscovery: false
@@ -21,7 +21,7 @@ spec:
       prefetchPct: "25"
       prefetchTimeout: "30"
     nodeSelector:
-      scale.spectrum.ibm.com/daemon-selector: ""
+      scale.spectrum.ibm.com/role: storage
     roles:
     - name: client
       resources:
