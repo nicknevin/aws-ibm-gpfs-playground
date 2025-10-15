@@ -1,11 +1,12 @@
 ---
-- name: Playbook to set up ceph
+- name: Playbook to set up ceph for DR
   hosts: localhost
   gather_facts: false
   become: false
   vars_files:
-    # Use this to override stuff that won't be committed to git
     - ../overrides.yml
+  environment:
+    KUBECONFIG: "{{ kubeconfig }}"
   tasks:
     - name: Print AWS infos
       ansible.builtin.debug:
@@ -15,32 +16,34 @@
       ansible.builtin.include_tasks:
         file: owner.yml
 
-    - name: Get workers
+    - name: Create templates folder
       tags:
         - lso1
-      ansible.builtin.shell: |
-        set -e
-        export KUBECONFIG="{{ kubeconfig }}"
-        {{ oc_bin }} get nodes -l node-role.kubernetes.io/worker -o name
-      register: workers_raw
+        - ceph-disks
+        - subscriptions
+      ansible.builtin.file:
+        path: "{{ templatefolder }}"
+        state: directory
+        recurse: true
 
     - name: Template LSO operator
       tags:
         - lso1
+        - subscriptions
       ansible.builtin.template:
         src: ../templates/{{ item }}
-        dest: "{{ gpfsfolder }}/{{ item }}"
+        dest: "{{ templatefolder }}/{{ item }}"
         mode: "0644"
       loop:
         - lso-subscription.yaml
 
-    - name: Apply lso subscription and lvs
+    - name: Apply LSO subscription
       tags:
         - lso1
+        - subscriptions
       ansible.builtin.shell: |
         set -e
-        export KUBECONFIG="{{ kubeconfig }}"
-        {{ oc_bin }} apply -f "{{ gpfsfolder }}/{{ item }}"
+        {{ oc_bin }} apply -f "{{ templatefolder }}/{{ item }}"
       register: lso_apply
       until: lso_apply is not failed
       retries: 20
@@ -48,28 +51,17 @@
       loop:
         - lso-subscription.yaml
 
-    - name: Find OpenShift EC2 Instances
+    - name: Get Openshift worker nodes and their AWS instance IDs
       tags:
         - ceph_disks
-      amazon.aws.ec2_instance_info:
-        profile: "{{ aws_profile }}"
-        region: "{{ ocp_region }}"
-        filters:
-          "tag:Name": "{{ ocp_cluster_name }}*worker*"
-          "instance-state-name": "running"
-      register: ec2_workers
-
-    - name: Set EC2 workers instance IDs
-      tags:
-        - ceph_disks
-      ansible.builtin.set_fact:
-        worker_ec2_ids: "{{ ec2_workers.instances | map(attribute='instance_id') | list }}"
+      ansible.builtin.include_tasks:
+        file: workers.yml
 
     - name: debug
       tags:
         - ceph_disks
       ansible.builtin.debug:
-        msg: "{{ worker_ec2_ids }}"
+        var: worker_ec2_ids
 
     - name: Create EBS io2 volume one per worker
       tags:
@@ -85,15 +77,14 @@
         device_name: "{{ ebs_device_name_ceph }}"
         tags:
           Name: "{{ ceph_volume_name }}-{{ item }}"
-          Owner: "{{ ocp_owner }}"
       register: ebs_volumes
       loop: "{{ worker_ec2_ids }}"
 
-    - name: debug
+    - name: Debug ceph volumes
       tags:
         - ceph_disks
       ansible.builtin.debug:
-        msg: "{{ ebs_volumes }}"
+        var: ebs_volumes
 
     - name: Check if all items have 'volume_id'
       assert:
@@ -117,18 +108,17 @@
         - lso1
       ansible.builtin.template:
         src: ../templates/{{ item }}
-        dest: "{{ gpfsfolder }}/{{ item }}"
+        dest: "{{ templatefolder }}/{{ item }}"
         mode: "0644"
       loop:
         - lso-lv.yaml
 
-    - name: Apply lv
+    - name: Apply LV
       tags:
         - lso1
       ansible.builtin.shell: |
         set -e
-        export KUBECONFIG="{{ kubeconfig }}"
-        {{ oc_bin }} apply -f "{{ gpfsfolder }}/{{ item }}"
+        {{ oc_bin }} apply -f "{{ templatefolder }}/{{ item }}"
       register: lso_apply
       until: lso_apply is not failed
       loop:
@@ -137,9 +127,10 @@
     - name: Template ceph files
       tags:
         - ceph1
+        - subscriptions
       ansible.builtin.template:
         src: ../templates/{{ item }}
-        dest: "{{ gpfsfolder }}/{{ item }}"
+        dest: "{{ templatefolder }}/{{ item }}"
         mode: "0644"
       loop:
         - ceph-subscription.yaml
@@ -151,10 +142,10 @@
     - name: Apply ceph subscription
       tags:
         - ceph1
+        - subscriptions
       ansible.builtin.shell: |
         set -e
-        export KUBECONFIG="{{ kubeconfig }}"
-        {{ oc_bin }} apply -f "{{ gpfsfolder }}/{{ item }}"
+        {{ oc_bin }} apply -f "{{ templatefolder }}/{{ item }}"
       register: ceph_apply
       until: ceph_apply is not failed
       retries: 20
@@ -167,7 +158,6 @@
         - ceph1
       ansible.builtin.shell: |
         set -ex
-        export KUBECONFIG={{ kubeconfig }}
         for node in $({{ oc_bin }} get nodes -l node-role.kubernetes.io/worker -o name)
         do
           {{ oc_bin }} label ${node} cluster.ocs.openshift.io/openshift-storage=''
@@ -178,8 +168,7 @@
         - ceph1
       ansible.builtin.shell: |
         set -e
-        export KUBECONFIG="{{ kubeconfig }}"
-        {{ oc_bin }} apply -f "{{ gpfsfolder }}/{{ item }}"
+        {{ oc_bin }} apply -f "{{ templatefolder }}/{{ item }}"
       register: ceph_apply
       until: ceph_apply is not failed
       retries: 20

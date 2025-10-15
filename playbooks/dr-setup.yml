@@ -1,0 +1,137 @@
+---
+- name: Playbook to set up Openshift clusters for DR
+  hosts: localhost
+  gather_facts: false
+  become: false
+  tasks:
+    - name: Print AWS infos
+      tags:
+        - 1_ocp_install
+      ansible.builtin.debug:
+        msg: "Region: {{ ocp_region }} - Cluster: {{ ocp_cluster_name }}.{{ ocp_domain }} - Nodes [{{ ocp_master_count }}]: {{ ocp_master_type }} - AWS Profile: {{ aws_profile }}"
+
+    - name: Set OCP owner from AWS user
+      tags:
+        - 1_ocp_install
+      ansible.builtin.include_tasks:
+        file: owner.yml
+        apply:
+          tags:
+            - 1_ocp_install
+
+    - name: Verify htpasswd exists
+      ansible.builtin.command:
+        cmd: which htpasswd
+      register: htpasswd_check
+      failed_when: htpasswd_check.rc != 0
+      tags:
+        - 1_ocp_install
+
+    - name: Create working folder
+      tags:
+        - 1_ocp_install
+      ansible.builtin.file:
+        path: "{{ ocpfolder }}"
+        state: directory
+        recurse: true
+
+    - name: Does cluster metadata.json exist
+      tags:
+        - 1_ocp_install
+      ansible.builtin.stat:
+        path: "{{ ocpfolder }}/metadata.json"
+      register: metadata_json_file
+
+    - name: Template OCP install file
+      tags:
+        - 1_ocp_install
+      ansible.builtin.template:
+        src: ../templates/full-cluster-install-config.j2.yaml
+        dest: "{{ ocpfolder }}/install-config.yaml"
+      when: not metadata_json_file.stat.exists
+
+    - name: Install ocp cluster
+      tags:
+        - 1_ocp_install
+      ansible.builtin.shell: |
+        set -ex
+        id
+        {{ basefolder }}/{{ ocp_version }}/openshift-install create cluster --dir=. &> {{ logsfolder }}/oc-{{ ocp_version }}-{{ ocp_cluster_name }}.log
+      args:
+        chdir: "{{ ocpfolder }}"
+      environment:
+        AWS_PROFILE: "{{ aws_profile }}"
+      when: not metadata_json_file.stat.exists
+
+    - name: Does cluster kubeconfig exist
+      tags:
+        - 1_ocp_install
+      ansible.builtin.stat:
+        path: "{{ kubeconfig }}"
+      register: kubeconfig_file
+
+    - name: Fail here there is no kubeconfig file
+      tags:
+        - 1_ocp_install
+      ansible.builtin.fail: msg="The openshift cluster kubeconfig file is missing, please check {{ ocpfolder }}.openshift_install.log"
+      when: not kubeconfig_file.stat.exists
+
+    - name: Set kubeadmin password fact
+      tags:
+        - 1_ocp_install
+      when: kubeadmin_pass is defined and kubeadmin_pass | length > 0
+      block:
+        - name: Encrypt kubeadmin password
+          ansible.builtin.shell: |
+            set -o pipefail
+            echo -n "{{ kubeadmin_pass }}" | htpasswd -i -B -n admin | awk -F ":" '{ print $2}' | base64 -w0
+          register:
+            hashed_password_out
+        - name: Set hashed password fact
+          tags:
+            - 1_ocp_install
+          ansible.builtin.set_fact:
+            hashed_password: "{{ hashed_password_out.stdout }}"
+
+        - name: Set kubeadmin password
+          tags:
+            - 1_ocp_install
+          ansible.builtin.shell: |
+            set -e
+            chmod 0600 {{ kubeconfig }}
+            export KUBECONFIG={{ kubeconfig }}
+            {{ oc_bin }} patch secret -n kube-system kubeadmin --type json -p '[{"op": "replace", "path": "/data/kubeadmin", "value": "'{{ hashed_password }}'"}]'
+
+    - name: Get Openshift worker nodes and their AWS instance IDs
+      tags:
+        - 2_ebs
+      ansible.builtin.include_tasks:
+        file: workers.yml
+
+    - name: Create EBS io2 volume
+      tags:
+        - 2_ebs
+      amazon.aws.ec2_vol:
+        profile: "{{ aws_profile }}"
+        region: "{{ ocp_region }}"
+        availability_zone: "{{ ocp_az }}"
+        volume_size: "{{ ebs_volume_size }}"
+        volume_type: "{{ ebs_volume_type }}"
+        multi_attach: true
+        iops: "{{ ebs_iops }}"
+        tags:
+          Name: "{{ ebs_volume_name }}"
+          Owner: "{{ ocp_owner }}"
+      register: ebs_volume
+
+    - name: Attach EBS volume to workers
+      tags:
+        - 2_ebs
+      amazon.aws.ec2_vol:
+        profile: "{{ aws_profile }}"
+        region: "{{ ocp_region }}"
+        instance: "{{ item }}"
+        id: "{{ ebs_volume.volume_id }}"
+        device_name: "{{ ebs_device_name }}"
+      loop: "{{ worker_ec2_ids }}"
+      when: ebs_volume.volume_id is defined

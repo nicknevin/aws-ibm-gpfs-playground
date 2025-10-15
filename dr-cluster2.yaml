@@ -1,0 +1,17 @@
+ocp_version: "4.19.15"
+
+ocp_az: ca-central-1a
+ocp_region: ca-central-1
+
+ocp_domain: fusionaccess.devcluster.openshift.com
+ocp_cluster_name: dr-nick-2
+ocp_worker_count: 0
+ocp_master_type: m5.4xlarge
+
+ebs_volume_name: dr-nick-2-volume-1
+
+ssh_pubkey: "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAACAQCfmHD71Mke3IBoEjKjIR87evKfvXUNuCGoH3OOhVEUOJYCKkyY9MLPn+cZzkqCQBSqAit3r0w1EdapmQcdu2l0n0zTkPbKi9Iu/jLlFV6zhnGCusc9rfHqKiG6N30QHYMwZFR+RlD+lTopP58YRVIb0Mvye5nzrow+vCu7bFK0tDApImFHTscF4bVdc1FfF3oFSRvW2AhtLBfIQueUu9RhWpJmD9rtB05GMY7dop10MkAh82cKUSw3ef+Sa4bU+O99MjiqearLvmiD72OtUoG2ZAEefZZSraujxT5oq2QHN/v7d5kcG5rr3XukmxF02Iuxs+PZvToEB36Q1zLsjLOaJxbMARWNoKu1UJ0SV+3+nplZBTvSgey48pv4LBOooNl1XUs1pc9+t6QPUt5QgsFFX2UcxHGZ9zGFOmW2EUmXIN/CoLM8u9/fRqnPBe/Jd81QtMJqF1sw7U+yxdZraTuqemvH2e9dh+sRjnzIoQLKHn66c61d72HDKu+xz/K9Rq3+IK3RptmvGnpro5veDQdxLGDpgrC3uB3Xhp3PftHu2cPD4XDxh5rKlPDV3ZRuGqugFBmhar4qVodY35B8SWyB3s0FQg7CY8ZoCx7pa5IgQLKMqRNFXty7jyYaFAhTzt84hhlZp8x0l1+W3Nm2sFO+nr8AtRwn9ufJm/5UpjOUGw== tmp"
+
+basefolder: "{{ '~/dr-playground' | expanduser }}/{{ ocp_cluster_name }}"
+
+templatefolder: "{{ basefolder }}/templates"

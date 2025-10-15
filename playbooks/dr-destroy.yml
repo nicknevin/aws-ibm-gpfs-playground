@@ -1,0 +1,54 @@
+---
+- name: Destroy cluster and EBS volumes
+  hosts: localhost
+  become: false
+  gather_facts: false
+  vars_files:
+    - ../overrides.yml
+  tasks:
+    - name: Does cluster metadata.json exist
+      ansible.builtin.stat:
+        path: "{{ ocpfolder }}/metadata.json"
+      register: metadata_json_file
+
+    - name: Get Openshift worker nodes and their AWS instance IDs
+      tags:
+        - 3_ebs
+      ansible.builtin.include_tasks:
+        file: workers.yml
+
+    - name: Debug worker instance IDs
+      ansible.builtin.debug:
+        var: worker_ec2_ids
+
+    - name: Destroy ocp cluster
+      tags:
+        - ocp_destroy
+      ansible.builtin.shell: |
+        {{ basefolder }}/{{ ocp_version }}/openshift-install destroy cluster --dir=. &> {{ logsfolder }}/oc-{{ ocp_version }}-destroy.log
+      args:
+        chdir: "{{ ocpfolder }}"
+      environment:
+        AWS_PROFILE: "{{ aws_profile }}"
+      when: metadata_json_file.stat.exists
+
+    - name: Get the Volume ID by Tag Name
+      amazon.aws.ec2_vol_info:
+        profile: "{{ aws_profile }}"
+        region: "{{ ocp_region }}"
+        filters:
+          "tag:Name": "{{ ebs_volume_name }}"
+      register: volume_info
+
+    - name: Debug volume
+      ansible.builtin.debug:
+        msg: "{{ volume_info }}"
+
+    - name: Delete EBS io2 volume
+      amazon.aws.ec2_vol:
+        profile: "{{ aws_profile }}"
+        region: "{{ ocp_region }}"
+        id: "{{ item.id }}"
+        state: absent
+      loop: "{{ volume_info.volumes }}"
+      when: volume_info.volumes | length > 0
