@@ -1,0 +1,19 @@
+ocp_version: "4.19.15"
+
+ocp_az: eu-north-1b
+ocp_region: eu-north-1
+
+ocp_domain: fusionaccess.devcluster.openshift.com
+ocp_cluster_name: dr-eun1b-1
+ocp_worker_count: 0
+ocp_master_type: m5.4xlarge
+
+ebs_volume_name: "{{ ocp_cluster_name }}-volume-1"
+
+# Replace with your own public key
+ssh_pubkey: "{{ lookup('file', '~/.ssh/id_rsa.pub' | expanduser) }}"
+
+basefolder: "{{ '~/dr-playground' | expanduser }}/{{ ocp_cluster_name }}"
+
+templatefolder: "{{ basefolder }}/templates"
+
