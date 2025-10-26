@@ -26,6 +26,46 @@ Both clusters are configured with:
 - EBS io2 volumes for persistent storage
 - Located in `eu-north-1b` availability zone
 
+### Architecture Overview
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    Your Local Machine                       │
+│  ┌─────────────────────────────────────────────────────┐    │
+│  │  ~/dr-playground/dr-eun1b-1/4.19.15/               │    │
+│  │    ├── oc                 (OpenShift CLI)         │    │
+│  │    ├── kubectl             (Kubernetes CLI)        │    │
+│  │    └── openshift-install   (Cluster installer)      │    │
+│  └─────────────────────────────────────────────────────┘    │
+│  ┌─────────────────────────────────────────────────────┐    │
+│  │  ~/dr-playground/dr-eun1b-2/4.19.15/               │    │
+│  │    ├── oc                 (OpenShift CLI)         │    │
+│  │    ├── kubectl             (Kubernetes CLI)        │    │
+│  │    └── openshift-install   (Cluster installer)      │    │
+│  └─────────────────────────────────────────────────────┘    │
+└─────────────────────────────────────────────────────────────┘
+                            ↓
+              (Ansible playbooks manage cluster creation)
+                            ↓
+┌─────────────────────────────────────────────────────────────┐
+│                    AWS eu-north-1 Region                     │
+│  ┌──────────────────────────┐  ┌──────────────────────────┐ │
+│  │   DR Cluster 1 (primary) │  │   DR Cluster 2 (DR)      │ │
+│  │  ┌────────────────────┐ │  │  ┌────────────────────┐ │ │
+│  │  │ 3x m5.4xlarge      │ │  │  │ 3x m5.4xlarge      │ │ │
+│  │  │ (masters/workers)  │ │  │  │ (masters/workers)  │ │ │
+│  │  └────────────────────┘ │  │  └────────────────────┘ │ │
+│  │  + EBS io2 volume       │  │  + EBS io2 volume       │ │ │
+│  └──────────────────────────┘  └──────────────────────────┘ │
+└─────────────────────────────────────────────────────────────┘
+```
+
+**Key Points:**
+- OCP client tools are installed **locally on your machine**, not on AWS
+- Each cluster has its own directory structure for organization
+- `dr-setup.yml` playbook creates the actual OpenShift clusters in AWS
+- The playbook is idempotent - it won't recreate existing clusters
+
 ## Prerequisites
 
 ### Required Software
@@ -88,42 +128,75 @@ templatefolder: "{{ basefolder }}/templates"
 
 ## Setup Procedures
 
-### Step 1: Initial Setup
+### Important: Understanding the Installation Process
 
-1. **Clone the repository and navigate to the directory:**
-   ```bash
-   cd /home/nlevanon/workspace/DR/aws-ibm-gpfs-playground
-   ```
+The installation process works as follows:
+1. **OCP Clients Setup**: Downloads and installs `oc`, `kubectl`, `openshift-install`, and `butane` tools to **your local machine** once per cluster. These tools are stored in `~/dr-playground/{cluster-name}/4.19.15/`
+2. **Cluster Creation**: Uses `openshift-install` to create the OpenShift cluster in AWS. This creates EC2 instances, networks, and all cluster infrastructure.
+3. **EBS Volume Setup**: Attaches EBS volumes to the cluster nodes for persistent storage.
 
-2. **Set up OCP clients for both clusters:**
-   ```bash
-   ansible-playbook -i hosts -e @dr-eun1b-cluster1.yaml playbooks/ocp-clients.yml
-   ansible-playbook -i hosts -e @dr-eun1b-cluster2.yaml playbooks/ocp-clients.yml
-   ```
+**Note**: The OCP client tools (`oc`, `openshift-install`, etc.) are installed on your **local machine**, not on the cluster nodes. Each cluster has its own directory structure to keep binaries organized.
 
-### Step 2: Create DR Clusters
+### Step 1: Navigate to the Repository
 
-1. **Create DR Cluster 1:**
-   ```bash
-   ansible-playbook -i hosts -e @dr-eun1b-cluster1.yaml playbooks/dr-setup.yml
-   ```
+```bash
+cd /home/nlevanon/workspace/DR/aws-ibm-gpfs-playground
+```
 
-2. **Create DR Cluster 2:**
-   ```bash
-   ansible-playbook -i hosts -e @dr-eun1b-cluster2.yaml playbooks/dr-setup.yml
-   ```
+### Step 2: Set up OCP Clients (One-time per cluster)
 
-### Step 3: Set up Ceph Storage (Optional)
+This step downloads OpenShift client tools to your local machine. You need to run this for **each cluster** you plan to create because each cluster config points to a different directory.
 
-1. **Install Ceph on Cluster 1:**
-   ```bash
-   ansible-playbook -i hosts -e @dr-eun1b-cluster1.yaml playbooks/dr-ceph.yml
-   ```
+**For DR Cluster 1:**
+```bash
+ansible-playbook -i hosts -e @dr-eun1b-cluster1.yaml playbooks/ocp-clients.yml
+```
+This installs tools to: `~/dr-playground/dr-eun1b-1/4.19.15/`
 
-2. **Install Ceph on Cluster 2:**
-   ```bash
-   ansible-playbook -i hosts -e @dr-eun1b-cluster2.yaml playbooks/dr-ceph.yml
-   ```
+**For DR Cluster 2:**
+```bash
+ansible-playbook -i hosts -e @dr-eun1b-cluster2.yaml playbooks/ocp-clients.yml
+```
+This installs tools to: `~/dr-playground/dr-eun1b-2/4.19.15/`
+
+**What gets installed:**
+- `oc` - OpenShift CLI client
+- `kubectl` - Kubernetes CLI client  
+- `openshift-install` - Cluster installation tool
+- `butane` - Configuration generation tool
+
+### Step 3: Create DR Clusters in AWS
+
+**Create DR Cluster 1:**
+```bash
+ansible-playbook -i hosts -e @dr-eun1b-cluster1.yaml playbooks/dr-setup.yml
+```
+This will:
+1. Check if cluster already exists (skips if metadata.json exists)
+2. Create install-config.yaml template
+3. Run `openshift-install create cluster` to create the cluster in AWS
+4. Create an EBS io2 volume (150 GB)
+5. Attach the EBS volume to all worker nodes
+
+**Create DR Cluster 2:**
+```bash
+ansible-playbook -i hosts -e @dr-eun1b-cluster2.yaml playbooks/dr-setup.yml
+```
+Performs the same operations for the second cluster.
+
+**Time**: Each cluster installation takes approximately 1-1.5 hours.
+
+### Step 4: Set up Ceph Storage (Optional)
+
+**Install Ceph on Cluster 1:**
+```bash
+ansible-playbook -i hosts -e @dr-eun1b-cluster1.yaml playbooks/dr-ceph.yml
+```
+
+**Install Ceph on Cluster 2:**
+```bash
+ansible-playbook -i hosts -e @dr-eun1b-cluster2.yaml playbooks/dr-ceph.yml
+```
 
 ## Access Methods
 
@@ -389,23 +462,69 @@ oc get pods -n openshift-dns
 ## Cleanup Procedures
 
 ### Destroy Clusters
-```bash
-# Destroy DR Cluster 1
-ansible-playbook -i hosts -e @dr-eun1b-cluster1.yaml playbooks/dr-destroy.yml
 
-# Destroy DR Cluster 2
+The `dr-destroy.yml` playbook will:
+1. Destroy the OpenShift cluster using `openshift-install destroy cluster`
+2. Identify the EBS volume by name tag
+3. Delete the EBS volume
+
+**Warning**: This is destructive and cannot be undone without backups!
+
+#### Destroy DR Cluster 1
+```bash
+ansible-playbook -i hosts -e @dr-eun1b-cluster1.yaml playbooks/dr-destroy.yml
+```
+
+**Time**: Takes approximately 5-7 minutes to destroy the cluster and remove resources.
+
+#### Destroy DR Cluster 2
+```bash
 ansible-playbook -i hosts -e @dr-eun1b-cluster2.yaml playbooks/dr-destroy.yml
 ```
 
-### Manual Cleanup
+**What gets destroyed:**
+- All EC2 instances (masters and workers)
+- VPC, subnets, route tables
+- Security groups and network ACLs
+- Load balancers
+- EBS volumes (after detaching)
+- S3 buckets (if created)
+- IAM roles and policies
+
+**What remains on your local machine:**
+- OCP client tools in `~/dr-playground/{cluster-name}/4.19.15/`
+- Cluster installation files in `~/dr-playground/{cluster-name}/ocp_install_files/`
+- Log files (installation logs, Ansible logs)
+
+#### Optional: Clean Up Local Files
+
+After destroying clusters, you can optionally remove the local files:
+
 ```bash
+# Remove Cluster 1 local files
+rm -rf ~/dr-playground/dr-eun1b-1
+
+# Remove Cluster 2 local files  
+rm -rf ~/dr-playground/dr-eun1b-2
+```
+
+**Note**: Keep these files if you might need to debug issues or re-attach to destroyed clusters.
+
+### Manual Cleanup (If Playbook Fails)
+
+If the automated destroy playbook fails, you can manually clean up AWS resources:
+
+```bash
+# List and identify resources
+aws ec2 describe-instances --region eu-north-1 --filters "Name=tag:Name,Values=*dr-eun1b-*" --query 'Reservations[*].Instances[*].[InstanceId,Name]'
+
+# Terminate instances (replace with actual IDs)
+aws ec2 terminate-instances --instance-ids i-xxxxx i-yyyyy i-zzzzz --region eu-north-1
+
 # Delete EBS volumes
 aws ec2 delete-volume --volume-id vol-xxxxxxxx --region eu-north-1
 
-# Delete security groups
-aws ec2 delete-security-group --group-id sg-xxxxxxxx --region eu-north-1
-
-# Delete VPC and subnets
+# Delete VPC and associated resources (carefully!)
 aws ec2 delete-subnet --subnet-id subnet-xxxxxxxx --region eu-north-1
 aws ec2 delete-vpc --vpc-id vpc-xxxxxxxx --region eu-north-1
 ```
