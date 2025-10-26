@@ -32,17 +32,18 @@ Both clusters are configured with:
 ┌─────────────────────────────────────────────────────────────┐
 │                    Your Local Machine                       │
 │  ┌─────────────────────────────────────────────────────┐    │
-│  │  ~/dr-playground/dr-eun1b-1/4.19.15/               │    │
+│  │  ~/dr-playground/shared/4.19.15/ (756 MB once)     │    │
 │  │    ├── oc                 (OpenShift CLI)         │    │
 │  │    ├── kubectl             (Kubernetes CLI)        │    │
-│  │    └── openshift-install   (Cluster installer)      │    │
+│  │    ├── openshift-install   (Cluster installer)     │    │
+│  │    └── butane              (Config generator)      │    │
 │  └─────────────────────────────────────────────────────┘    │
-│  ┌─────────────────────────────────────────────────────┐    │
-│  │  ~/dr-playground/dr-eun1b-2/4.19.15/               │    │
-│  │    ├── oc                 (OpenShift CLI)         │    │
-│  │    ├── kubectl             (Kubernetes CLI)        │    │
-│  │    └── openshift-install   (Cluster installer)      │    │
-│  └─────────────────────────────────────────────────────┘    │
+│          ↓ symlinks            ↓ symlinks                    │
+│  ┌────────────────────┐  ┌────────────────────┐             │
+│  │ dr-eun1b-1/       │  │ dr-eun1b-2/       │             │
+│  │   4.19.15/ → → →  │  │   4.19.15/ → → →  │             │
+│  │ ocp_install_files/│  │ ocp_install_files/│             │
+│  └────────────────────┘  └────────────────────┘             │
 └─────────────────────────────────────────────────────────────┘
                             ↓
               (Ansible playbooks manage cluster creation)
@@ -61,10 +62,15 @@ Both clusters are configured with:
 ```
 
 **Key Points:**
+- **Optimized Approach**: Binaries stored once in `~/dr-playground/shared/4.19.15/`, symlinked to each cluster (saves 756 MB per cluster)
 - OCP client tools are installed **locally on your machine**, not on AWS
-- Each cluster has its own directory structure for organization
+- Each cluster has its own directory for installation files (`ocp_install_files/`)
 - `dr-setup.yml` playbook creates the actual OpenShift clusters in AWS
 - The playbook is idempotent - it won't recreate existing clusters
+
+**Storage Impact:**
+- **Shared binaries approach**: ~756 MB for any number of clusters
+- **Per-cluster binaries approach**: 756 MB × number of clusters
 
 ## Prerequisites
 
@@ -131,11 +137,41 @@ templatefolder: "{{ basefolder }}/templates"
 ### Important: Understanding the Installation Process
 
 The installation process works as follows:
-1. **OCP Clients Setup**: Downloads and installs `oc`, `kubectl`, `openshift-install`, and `butane` tools to **your local machine** once per cluster. These tools are stored in `~/dr-playground/{cluster-name}/4.19.15/`
+1. **OCP Clients Setup**: Downloads and installs `oc`, `kubectl`, `openshift-install`, and `butane` tools to **your local machine**. These tools are stored per cluster directory but can be shared (see optimization below).
 2. **Cluster Creation**: Uses `openshift-install` to create the OpenShift cluster in AWS. This creates EC2 instances, networks, and all cluster infrastructure.
 3. **EBS Volume Setup**: Attaches EBS volumes to the cluster nodes for persistent storage.
 
-**Note**: The OCP client tools (`oc`, `openshift-install`, etc.) are installed on your **local machine**, not on the cluster nodes. Each cluster has its own directory structure to keep binaries organized.
+**Note**: The OCP client tools (`oc`, `openshift-install`, etc.) are installed on your **local machine**, not on the cluster nodes.
+
+### 💡 Optimization: Avoid Duplicate Binaries
+
+**Current Issue**: By default, the playbooks download identical binaries (756 MB each) to separate directories:
+- `~/dr-playground/dr-eun1b-1/4.19.15/` (756 MB)
+- `~/dr-playground/dr-eun1b-2/4.19.15/` (756 MB)
+- **Total**: ~1.5 GB of duplicate binaries
+
+**Solution**: Create a shared binaries directory and symlink per cluster:
+
+```bash
+# Create shared binary directory
+mkdir -p ~/dr-playground/shared/4.19.15
+
+# Download binaries once to shared location
+cd ~/dr-playground/shared/4.19.15
+wget https://mirror.openshift.com/pub/openshift-v4/clients/ocp/4.19.15/amd64/openshift-client-linux.tar.gz
+wget https://mirror.openshift.com/pub/openshift-v4/clients/ocp/4.19.15/amd64/openshift-install-linux.tar.gz
+tar xzf openshift-client-linux.tar.gz
+tar xzf openshift-install-linux.tar.gz
+
+# Create symlinks for each cluster
+ln -s ~/dr-playground/shared/4.19.15/oc ~/dr-playground/dr-eun1b-1/4.19.15/oc
+ln -s ~/dr-playground/shared/4.19.15/kubectl ~/dr-playground/dr-eun1b-1/4.19.15/kubectl
+ln -s ~/dr-playground/shared/4.19.15/openshift-install ~/dr-playground/dr-eun1b-1/4.19.15/openshift-install
+
+# Repeat for cluster 2 (or write a script)
+```
+
+**Alternative**: Modify the config files to point `basefolder` to a shared location for binaries.
 
 ### Step 1: Navigate to the Repository
 
@@ -143,27 +179,80 @@ The installation process works as follows:
 cd /home/nlevanon/workspace/DR/aws-ibm-gpfs-playground
 ```
 
-### Step 2: Set up OCP Clients (One-time per cluster)
+### Step 2: Set up OCP Clients
 
-This step downloads OpenShift client tools to your local machine. You need to run this for **each cluster** you plan to create because each cluster config points to a different directory.
+⚠️ **Important**: The playbooks will download 756 MB of binaries **per cluster**. To save disk space, you have two options:
 
-**For DR Cluster 1:**
+#### Option A: Share Binaries (Recommended - Saves 756 MB per additional cluster)
+
+**Quick Setup using the provided script:**
 ```bash
-ansible-playbook -i hosts -e @dr-eun1b-cluster1.yaml playbooks/ocp-clients.yml
+./scripts/setup-shared-binaries.sh dr-eun1b-1 dr-eun1b-2
 ```
-This installs tools to: `~/dr-playground/dr-eun1b-1/4.19.15/`
 
-**For DR Cluster 2:**
+**Manual Setup (if you prefer to do it step by step):**
+
+**Step 2a.1**: Download binaries once to a shared location:
 ```bash
+# Create shared directory
+mkdir -p ~/dr-playground/shared/4.19.15
+
+# Download binaries
+cd ~/dr-playground/shared/4.19.15
+wget https://mirror.openshift.com/pub/openshift-v4/multi/clients/ocp/4.19.15/amd64/openshift-client-linux.tar.gz
+wget https://mirror.openshift.com/pub/openshift-v4/multi/clients/ocp/4.19.15/amd64/openshift-install-linux.tar.gz
+tar xzf openshift-client-linux.tar.gz
+tar xzf openshift-install-linux.tar.gz
+
+# Download butane
+wget -O butane https://mirror.openshift.com/pub/openshift-v4/clients/butane/v0.23.0-0/butane-amd64
+chmod +x butane
+
+# Clean up archives
+rm openshift-client-linux.tar.gz openshift-install-linux.tar.gz
+```
+
+**Step 2a.2**: Create symlinks for cluster 1:
+```bash
+mkdir -p ~/dr-playground/dr-eun1b-1/4.19.15
+ln -s ~/dr-playground/shared/4.19.15/oc ~/dr-playground/dr-eun1b-1/4.19.15/oc
+ln -s ~/dr-playground/shared/4.19.15/kubectl ~/dr-playground/dr-eun1b-1/4.19.15/kubectl
+ln -s ~/dr-playground/shared/4.19.15/openshift-install ~/dr-playground/dr-eun1b-1/4.19.15/openshift-install
+ln -s ~/dr-playground/shared/4.19.15/butane ~/dr-playground/dr-eun1b-1/4.19.15/butane
+```
+
+**Step 2a.3**: Create symlinks for cluster 2:
+```bash
+mkdir -p ~/dr-playground/dr-eun1b-2/4.19.15
+ln -s ~/dr-playground/shared/4.19.15/oc ~/dr-playground/dr-eun1b-2/4.19.15/oc
+ln -s ~/dr-playground/shared/4.19.15/kubectl ~/dr-playground/dr-eun1b-2/4.19.15/kubectl
+ln -s ~/dr-playground/shared/4.19.15/openshift-install ~/dr-playground/dr-eun1b-2/4.19.15/openshift-install
+ln -s ~/dr-playground/shared/4.19.15/butane ~/dr-playground/dr-eun1b-2/4.19.15/butane
+```
+
+**Benefits**:
+- Saves 756 MB per additional cluster
+- Single source of truth for binaries  
+- Easy to update all clusters at once
+- **Works perfectly with playbooks** - symlinks are transparent to ansible
+
+#### Option B: Use Playbooks (Downloads binaries per cluster)
+
+If you don't mind the extra space, use the playbooks as-is:
+
+```bash
+# Downloads 756 MB to ~/dr-playground/dr-eun1b-1/4.19.15/
+ansible-playbook -i hosts -e @dr-eun1b-cluster1.yaml playbooks/ocp-clients.yml
+
+# Downloads 756 MB to ~/dr-playground/dr-eun1b-2/4.19.15/
 ansible-playbook -i hosts -e @dr-eun1b-cluster2.yaml playbooks/ocp-clients.yml
 ```
-This installs tools to: `~/dr-playground/dr-eun1b-2/4.19.15/`
 
 **What gets installed:**
-- `oc` - OpenShift CLI client
-- `kubectl` - Kubernetes CLI client  
-- `openshift-install` - Cluster installation tool
-- `butane` - Configuration generation tool
+- `oc` - OpenShift CLI client (179 MB)
+- `kubectl` - Kubernetes CLI client (179 MB, same binary as oc)  
+- `openshift-install` - Cluster installation tool (570 MB)
+- `butane` - Configuration generation tool (8.1 MB)
 
 ### Step 3: Create DR Clusters in AWS
 
