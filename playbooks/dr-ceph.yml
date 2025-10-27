@@ -54,8 +54,13 @@
     - name: Get Openshift worker nodes and their AWS instance IDs
       tags:
         - ceph_disks
+        - always
       ansible.builtin.include_tasks:
         file: workers.yml
+        apply:
+          tags:
+            - ceph_disks
+            - always
 
     - name: debug
       tags:
@@ -87,6 +92,9 @@
         var: ebs_volumes
 
     - name: Check if all items have 'volume_id'
+      tags:
+        - ceph_disks
+        - lso1
       assert:
         that: item.volume_id is defined
         fail_msg: "Missing volume_id in one of the results"
@@ -94,11 +102,17 @@
       register: has_volume_id
 
     - name: Set ceph disks
+      tags:
+        - ceph_disks
+        - lso1
       ansible.builtin.set_fact:
         ceph_disks: "{{ ebs_volumes.results | map(attribute='volume.id') | list }}"
       when: has_volume_id is failed
 
     - name: Set ceph disks if not created from scratch
+      tags:
+        - ceph_disks
+        - lso1
       ansible.builtin.set_fact:
         ceph_disks: "{{ ebs_volumes.results | map(attribute='volume_id') | list }}"
       when: has_volume_id is not failed

@@ -277,15 +277,28 @@ Performs the same operations for the second cluster.
 
 ### Step 4: Set up Ceph Storage (Optional)
 
-**Install Ceph on Cluster 1:**
+**⚠️ Important**: You have two options for installing Ceph storage:
+
+1. **Upstream Rook-Ceph** (Recommended) - Community version, no license required
+2. **OpenShift Data Foundation (ODF)** - Red Hat's commercial product
+
+See the comprehensive guide: **[docs/CEPH-ROOK-INSTALLATION.md](docs/CEPH-ROOK-INSTALLATION.md)**
+
+**Quick Start - Upstream Rook-Ceph (No ODF):**
 ```bash
+# Install LSO and prepare disks
+ansible-playbook -i hosts -e @dr-eun1b-cluster1.yaml playbooks/dr-ceph.yml --tags lso1,ceph_disks
+
+# Then follow the manual steps in docs/CEPH-ROOK-INSTALLATION.md Method A
+```
+
+**Quick Start - ODF (Red Hat Product):**
+```bash
+# Full ODF installation (requires Red Hat subscription)
 ansible-playbook -i hosts -e @dr-eun1b-cluster1.yaml playbooks/dr-ceph.yml
 ```
 
-**Install Ceph on Cluster 2:**
-```bash
-ansible-playbook -i hosts -e @dr-eun1b-cluster2.yaml playbooks/dr-ceph.yml
-```
+For Cluster 2, replace `dr-eun1b-cluster1.yaml` with `dr-eun1b-cluster2.yaml`
 
 ## Access Methods
 

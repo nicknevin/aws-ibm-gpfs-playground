@@ -6,17 +6,47 @@
     label_selectors:
     - node-role.kubernetes.io/worker=
   register: node_list
-- name: Filter nodes by cluster name
+
+- name: Debug - Show all nodes found
+  debug:
+    msg: "Found {{ node_list.resources | length }} worker nodes"
+
+- name: Try to filter nodes by cluster name (if annotation exists)
   ansible.builtin.set_fact:
-    worker_nodes: "{{ node_list.resources | selectattr('metadata.annotations', 'defined') | json_query(worker_query) }}"
+    worker_nodes_filtered: "{{ node_list.resources | selectattr('metadata.annotations', 'defined') | json_query(worker_query) }}"
   vars:
     worker_query: "[?contains(metadata.annotations.\"machine.openshift.io/machine\", '/{{ ocp_cluster_name }}-')]"
-- name: Display node names and their instance IDs
+
+- name: Set worker nodes (use filtered if available, otherwise all)
+  ansible.builtin.set_fact:
+    worker_nodes: "{{ worker_nodes_filtered if (worker_nodes_filtered | length > 0) else node_list.resources }}"
+
+- name: Debug - Show selected worker nodes
   debug:
-    msg: "Instance: {{ item.spec.providerID.split('/')[-1] }}"
+    msg: "Selected {{ worker_nodes | length }} worker nodes for Ceph"
+
+- name: Verify nodes have providerID
+  ansible.builtin.assert:
+    that:
+      - worker_nodes | length > 0
+      - item.spec.providerID is defined
+    fail_msg: "Node {{ item.metadata.name }} does not have providerID set"
+    success_msg: "Node {{ item.metadata.name }} has providerID: {{ item.spec.providerID }}"
   loop: "{{ worker_nodes }}"
   loop_control:
     label: "{{ item.metadata.name }}"
+
+- name: Display node names and their instance IDs
+  debug:
+    msg: "Node: {{ item.metadata.name }} -> Instance: {{ item.spec.providerID.split('/')[-1] }}"
+  loop: "{{ worker_nodes }}"
+  loop_control:
+    label: "{{ item.metadata.name }}"
+
 - name: Get worker node instance IDs
   ansible.builtin.set_fact:
-    worker_ec2_ids: "{{ worker_nodes | map(attribute='spec.providerID') | map('split', '/') | map('last') }}"
+    worker_ec2_ids: "{{ worker_nodes | map(attribute='spec.providerID') | map('split', '/') | map('last') | list }}"
+
+- name: Debug - Show extracted instance IDs
+  debug:
+    var: worker_ec2_ids
