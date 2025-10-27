@@ -129,6 +129,18 @@ NODES=($(oc get nodes -l node-role.kubernetes.io/worker -o jsonpath='{.items[*].
 
 # Create cluster YAML
 CLUSTER_YAML="${PLAYGROUND_DIR}/rook-ceph-cluster.yaml"
+
+print_info "Checking if LSO (Local Storage Operator) PVs are available..."
+LSO_PV_COUNT=$(oc get pv --no-headers 2>/dev/null | grep -c "lso-sc" || echo "0")
+
+if [ "$LSO_PV_COUNT" -ge 3 ]; then
+    print_success "Found ${LSO_PV_COUNT} LSO PVs - using storageClassDeviceSets"
+    STORAGE_MODE="pvc"
+else
+    print_warning "No LSO PVs found - using raw devices (requires disks at /dev/disk/by-id/...)"
+    STORAGE_MODE="devices"
+fi
+
 cat > "${CLUSTER_YAML}" <<EOF
 apiVersion: ceph.rook.io/v1
 kind: CephCluster
@@ -155,8 +167,10 @@ spec:
     enabled: true
     ssl: true
   monitoring:
-    enabled: true
-    createPrometheusRules: true
+    enabled: false
+    # Note: Monitoring disabled to avoid RBAC issues with servicemonitors
+    # Can be enabled after cluster is running if Prometheus Operator is installed
+    createPrometheusRules: false
   network:
     connections:
       encryption:
@@ -201,19 +215,44 @@ spec:
       limits:
         memory: "8Gi"
   storage:
+EOF
+
+# Add storage configuration based on mode
+if [ "$STORAGE_MODE" = "pvc" ]; then
+    cat >> "${CLUSTER_YAML}" <<'EOF'
+    useAllNodes: true
+    useAllDevices: false
+    storageClassDeviceSets:
+      - name: set1
+        count: 3
+        portable: false
+        volumeClaimTemplates:
+          - metadata:
+              name: data
+            spec:
+              resources:
+                requests:
+                  storage: 150Gi
+              storageClassName: lso-sc
+              volumeMode: Block
+              accessModes:
+                - ReadWriteOnce
+EOF
+else
+    cat >> "${CLUSTER_YAML}" <<EOF
     useAllNodes: false
     useAllDevices: false
     nodes:
 EOF
-
-# Add nodes to the configuration
-for node in "${NODES[@]}"; do
-    cat >> "${CLUSTER_YAML}" <<EOF
+    # Add nodes with device paths
+    for node in "${NODES[@]}"; do
+        cat >> "${CLUSTER_YAML}" <<EOF
       - name: ${node}
         devices:
-          - name: "/dev/sde"
+          - name: "/dev/disk/by-id/nvme-Amazon_Elastic_Block_Store_vol*"
 EOF
-done
+    done
+fi
 
 print_success "Cluster configuration created at ${CLUSTER_YAML}"
 
@@ -348,16 +387,26 @@ spec:
             - /bin/bash
             - -c
             - |
-              CEPH_CONFIG="/etc/ceph/ceph.conf"
-              MON_CONFIG="/etc/rook/mon-endpoints"
-              KEYRING_FILE="/etc/ceph/keyring"
-              cat <<-ENDHERE > ${CEPH_CONFIG}
+              # Create ceph config
+              cat > /etc/ceph/ceph.conf <<EOC
               [global]
-              mon_host = \$(grep mon_host \${MON_CONFIG} | awk '{print \$3}')
+              mon_host = $(grep -E -o '([0-9]{1,3}\.){3}[0-9]{1,3}' /etc/rook/mon-endpoints | tr '\n' ',' | sed 's/,$//')
               [client.admin]
-              keyring = \${KEYRING_FILE}
-              ENDHERE
-              /bin/bash
+              keyring = /etc/ceph/keyring
+              EOC
+              
+              # Create keyring
+              cat > /etc/ceph/keyring <<EOK
+              [${ROOK_CEPH_USERNAME}]
+              key = ${ROOK_CEPH_SECRET}
+              caps mds = "allow *"
+              caps mgr = "allow *"
+              caps mon = "allow *"
+              caps osd = "allow *"
+              EOK
+              
+              # Keep container running
+              tail -f /dev/null
           imagePullPolicy: IfNotPresent
           tty: true
           stdin: true
