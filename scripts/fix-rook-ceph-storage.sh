@@ -238,7 +238,75 @@ done
 echo ""
 
 echo ""
-print_info "Step 5: Fixing Ceph toolbox..."
+print_info "Step 5: Creating storage pools..."
+
+print_info "  Creating CephBlockPool (replicapool)..."
+cat <<'EOF' | oc apply -f -
+apiVersion: ceph.rook.io/v1
+kind: CephBlockPool
+metadata:
+  name: replicapool
+  namespace: rook-ceph
+spec:
+  failureDomain: host
+  replicated:
+    size: 3
+    requireSafeReplicaSize: true
+  compressionMode: none
+EOF
+
+print_info "  Creating CephFilesystem (myfs)..."
+cat <<'EOF' | oc apply -f -
+apiVersion: ceph.rook.io/v1
+kind: CephFilesystem
+metadata:
+  name: myfs
+  namespace: rook-ceph
+spec:
+  metadataPool:
+    replicated:
+      size: 3
+      requireSafeReplicaSize: true
+    compressionMode: none
+  dataPools:
+    - name: replicated
+      failureDomain: host
+      replicated:
+        size: 3
+        requireSafeReplicaSize: true
+      compressionMode: none
+  metadataServer:
+    activeCount: 1
+    activeStandby: true
+    resources:
+      limits:
+        memory: "4Gi"
+      requests:
+        cpu: "1000m"
+        memory: "4Gi"
+EOF
+
+print_info "  Waiting for pools to be ready..."
+sleep 30
+
+# Check if pools are ready
+BLOCKPOOL_STATUS=$(oc get cephblockpool replicapool -n ${NAMESPACE} -o jsonpath='{.status.phase}' 2>/dev/null || echo "Unknown")
+FS_STATUS=$(oc get cephfilesystem myfs -n ${NAMESPACE} -o jsonpath='{.status.phase}' 2>/dev/null || echo "Unknown")
+
+if [ "$BLOCKPOOL_STATUS" = "Ready" ]; then
+    print_success "CephBlockPool is ready"
+else
+    print_warning "CephBlockPool status: $BLOCKPOOL_STATUS"
+fi
+
+if [ "$FS_STATUS" = "Ready" ]; then
+    print_success "CephFilesystem is ready"
+else
+    print_warning "CephFilesystem status: $FS_STATUS"
+fi
+
+echo ""
+print_info "Step 6: Fixing Ceph toolbox..."
 oc delete deployment rook-ceph-tools -n ${NAMESPACE} --ignore-not-found=true
 
 cat <<'EOF' | oc apply -f -
@@ -327,8 +395,19 @@ print_success "Rook-Ceph storage fix complete!"
 print_info "=========================================="
 
 echo ""
-print_info "Verification:"
+print_info "Step 7: Verification"
+echo ""
+
+print_info "CephCluster status:"
 oc get cephcluster -n ${NAMESPACE}
+
+echo ""
+print_info "Storage pools:"
+oc get cephblockpool,cephfilesystem -n ${NAMESPACE}
+
+echo ""
+print_info "Storage classes:"
+oc get sc | grep rook
 
 echo ""
 print_info "Checking Ceph status (may take a minute for toolbox to be fully ready)..."
@@ -336,11 +415,15 @@ sleep 10
 oc rsh -n ${NAMESPACE} deployment/rook-ceph-tools ceph -s 2>&1 || print_warning "Toolbox not ready yet, try: oc rsh -n ${NAMESPACE} deployment/rook-ceph-tools ceph -s"
 
 echo ""
-print_info "Check OSD pods:"
-echo "  oc get pods -n ${NAMESPACE} | grep osd"
+print_info "Useful commands:"
+print_info "  Check OSD pods:"
+echo "    oc get pods -n ${NAMESPACE} | grep osd"
 
-print_info "Monitor Ceph health:"
-echo "  oc rsh -n ${NAMESPACE} deployment/rook-ceph-tools ceph -s"
+print_info "  Monitor Ceph health:"
+echo "    oc rsh -n ${NAMESPACE} deployment/rook-ceph-tools ceph -s"
+
+print_info "  Test storage:"
+echo "    ./scripts/test-ceph-storage.sh ${KUBECONFIG}"
 
 echo ""
 print_success "Fix script completed!"
