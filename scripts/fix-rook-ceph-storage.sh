@@ -227,10 +227,18 @@ print_success "CephCluster recreated"
 echo ""
 print_info "Step 4: Waiting for OSDs to be created (this may take 5-10 minutes)..."
 for i in {1..60}; do
-    OSD_COUNT=$(oc get pods -n ${NAMESPACE} --no-headers 2>/dev/null | grep -c "rook-ceph-osd-[0-9]" || echo "0")
+    OSD_COUNT=$(oc get pods -n ${NAMESPACE} --no-headers 2>&1 | grep "rook-ceph-osd-[0-9]" | wc -l | tr -d ' ')
+    # Ensure OSD_COUNT is a valid integer
+    if ! [[ "$OSD_COUNT" =~ ^[0-9]+$ ]]; then
+        OSD_COUNT=0
+    fi
     if [ "$OSD_COUNT" -ge 3 ]; then
         print_success "Found ${OSD_COUNT} OSD pods"
         break
+    fi
+    if [ $i -eq 60 ]; then
+        print_warning "Timeout waiting for OSDs. Found ${OSD_COUNT} OSDs"
+        print_info "You can check status with: oc get pods -n ${NAMESPACE} | grep osd"
     fi
     echo -n "."
     sleep 10
