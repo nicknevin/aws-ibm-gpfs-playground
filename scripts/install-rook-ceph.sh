@@ -13,29 +13,10 @@
 
 set -e
 
-# Colors for output
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-NC='\033[0m' # No Color
-
-# Function to print colored output
-print_info() {
-    echo -e "${BLUE}[INFO]${NC} $1"
-}
-
-print_success() {
-    echo -e "${GREEN}[SUCCESS]${NC} $1"
-}
-
-print_warning() {
-    echo -e "${YELLOW}[WARNING]${NC} $1"
-}
-
-print_error() {
-    echo -e "${RED}[ERROR]${NC} $1"
-}
+# Load common library
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib/common.sh
+source "${SCRIPT_DIR}/lib/common.sh"
 
 # Check if cluster name is provided
 if [ -z "$1" ]; then
@@ -114,8 +95,11 @@ oc wait --for=condition=ready pod -l app=rook-ceph-operator -n ${NAMESPACE} --ti
 print_success "Rook operator is ready"
 
 echo ""
-print_info "Step 5/8: Labeling worker nodes for Ceph..."
+print_info "Step 5/8: Labeling worker nodes for Ceph and LSO..."
 for node in $(oc get nodes -l node-role.kubernetes.io/worker -o name); do
+    # Label for LSO (required for diskmaker-manager to discover disks)
+    oc label $node cluster.ocs.openshift.io/openshift-storage="" --overwrite
+    # Label for Ceph (optional, for node affinity)
     oc label $node role=storage-node --overwrite
     print_info "  Labeled: $(basename $node)"
 done
@@ -131,7 +115,11 @@ NODES=($(oc get nodes -l node-role.kubernetes.io/worker -o jsonpath='{.items[*].
 CLUSTER_YAML="${PLAYGROUND_DIR}/rook-ceph-cluster.yaml"
 
 print_info "Checking if LSO (Local Storage Operator) PVs are available..."
-LSO_PV_COUNT=$(oc get pv --no-headers 2>/dev/null | grep -c "lso-sc" || echo "0")
+LSO_PV_COUNT=$(oc get pv --no-headers 2>&1 | grep "lso-sc" | wc -l | tr -d ' ')
+# Ensure LSO_PV_COUNT is a valid integer
+if ! [[ "$LSO_PV_COUNT" =~ ^[0-9]+$ ]]; then
+    LSO_PV_COUNT=0
+fi
 
 if [ "$LSO_PV_COUNT" -ge 3 ]; then
     print_success "Found ${LSO_PV_COUNT} LSO PVs - using storageClassDeviceSets (PVC-based storage)"
@@ -141,7 +129,11 @@ else
     if oc get localvolume -n openshift-local-storage local-block &>/dev/null; then
         print_warning "LSO is installed but PVs not ready yet. Waiting 30 seconds..."
         sleep 30
-        LSO_PV_COUNT=$(oc get pv --no-headers 2>/dev/null | grep -c "lso-sc" || echo "0")
+        LSO_PV_COUNT=$(oc get pv --no-headers 2>&1 | grep "lso-sc" | wc -l | tr -d ' ')
+        # Ensure LSO_PV_COUNT is a valid integer
+        if ! [[ "$LSO_PV_COUNT" =~ ^[0-9]+$ ]]; then
+            LSO_PV_COUNT=0
+        fi
         if [ "$LSO_PV_COUNT" -ge 3 ]; then
             print_success "Found ${LSO_PV_COUNT} LSO PVs after waiting - using storageClassDeviceSets"
             STORAGE_MODE="pvc"
@@ -149,6 +141,23 @@ else
             print_error "LSO is installed but no PVs found. Please check LSO configuration."
             print_info "Expected: 3+ PVs with storageClassName 'lso-sc'"
             print_info "Current: ${LSO_PV_COUNT} PVs found"
+            print_info ""
+            print_info "Debug: Checking all PVs..."
+            oc get pv -o wide 2>&1
+            print_info ""
+            print_info "Debug: Checking LocalVolume configuration..."
+            oc get localvolume -n openshift-local-storage local-block -o yaml 2>&1
+            print_info ""
+            print_info "Debug: Checking LSO operator pods..."
+            oc get pods -n openshift-local-storage 2>&1
+            print_info ""
+            print_info "Debug: Checking LSO operator logs (last 20 lines)..."
+            oc logs -n openshift-local-storage -l app=local-storage-operator --tail=20 2>&1 || echo "No operator logs found"
+            print_info ""
+            print_error "Troubleshooting steps:"
+            print_info "1. Check if nodes are labeled: oc get nodes --show-labels | grep openshift-storage"
+            print_info "2. Check if disks exist: oc debug node/<node-name> -- chroot /host lsblk"
+            print_info "3. Re-run LSO setup: ansible-playbook -i hosts -e @<cluster-config>.yaml playbooks/dr-ceph.yml --tags lso1,ceph_disks"
             exit 1
         fi
     else

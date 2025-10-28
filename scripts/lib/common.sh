@@ -481,6 +481,94 @@ wait_for_ceph_filesystem() {
 }
 
 # =============================================================================
+# LSO (Local Storage Operator) operations
+# =============================================================================
+
+# Count LSO PVs safely
+count_lso_pvs() {
+    local pv_count=$(oc get pv --no-headers 2>&1 | grep "lso-sc" | wc -l | tr -d ' ')
+    # Ensure PV count is a valid integer
+    if ! [[ "$pv_count" =~ ^[0-9]+$ ]]; then
+        pv_count=0
+    fi
+    echo "$pv_count"
+}
+
+# Check if LSO is installed
+check_lso_installed() {
+    if oc get localvolume -n openshift-local-storage local-block &>/dev/null; then
+        return 0
+    else
+        return 1
+    fi
+}
+
+# Label nodes for LSO
+label_nodes_for_lso() {
+    print_info "Labeling worker nodes for LSO..."
+    for node in $(oc get nodes -l node-role.kubernetes.io/worker -o name); do
+        oc label $node cluster.ocs.openshift.io/openshift-storage="" --overwrite 2>&1 | grep -v "not labeled" || true
+        print_info "  Labeled: $(basename $node)"
+    done
+    print_success "All worker nodes labeled for LSO"
+}
+
+# Check and ensure nodes are labeled for LSO
+ensure_lso_node_labels() {
+    local labeled_nodes=$(oc get nodes -l cluster.ocs.openshift.io/openshift-storage -o name 2>/dev/null | wc -l | tr -d ' ')
+    local worker_nodes=$(oc get nodes -l node-role.kubernetes.io/worker -o name 2>/dev/null | wc -l | tr -d ' ')
+    
+    if [ "$labeled_nodes" -lt "$worker_nodes" ]; then
+        print_warning "Only ${labeled_nodes}/${worker_nodes} nodes have LSO label. Labeling all worker nodes..."
+        label_nodes_for_lso
+    else
+        print_success "All ${labeled_nodes} worker nodes already labeled for LSO"
+    fi
+}
+
+# Show LSO debug information
+show_lso_debug() {
+    print_info "Debug: Checking all PVs..."
+    oc get pv -o wide 2>&1
+    print_info ""
+    print_info "Debug: Checking LocalVolume configuration..."
+    oc get localvolume -n openshift-local-storage local-block -o yaml 2>&1
+    print_info ""
+    print_info "Debug: Checking LSO operator pods..."
+    oc get pods -n openshift-local-storage 2>&1
+    print_info ""
+    print_info "Debug: Checking LSO operator logs (last 20 lines)..."
+    oc logs -n openshift-local-storage -l app=local-storage-operator --tail=20 2>&1 || echo "No operator logs found"
+}
+
+# Wait for LSO PVs to be created
+wait_for_lso_pvs() {
+    local required_count="${1:-3}"
+    local timeout="${2:-60}"
+    local interval=10
+    local elapsed=0
+    
+    print_info "Waiting for LSO PVs to be created..."
+    
+    while [ $elapsed -lt $timeout ]; do
+        local pv_count=$(count_lso_pvs)
+        
+        if [ "$pv_count" -ge "$required_count" ]; then
+            print_success "Found $pv_count LSO PVs"
+            return 0
+        fi
+        
+        echo -n "."
+        sleep $interval
+        elapsed=$((elapsed + interval))
+    done
+    
+    echo ""
+    print_error "Timeout waiting for LSO PVs. Found $(count_lso_pvs)/${required_count}"
+    return 1
+}
+
+# =============================================================================
 # URL validation
 # =============================================================================
 
@@ -545,6 +633,144 @@ get_library_version() {
 
 print_library_info() {
     print_debug "Common Library Version: $(get_library_version)"
+}
+
+# =============================================================================
+# Resource Cleanup Operations
+# =============================================================================
+
+# Safe delete Kubernetes resource with finalizer handling
+# Usage: safe_delete_resource <resource-type> <resource-name> <namespace> [timeout]
+# Example: safe_delete_resource cephblockpool replicapool rook-ceph 30
+safe_delete_resource() {
+    local resource_type="$1"
+    local resource_name="$2"
+    local namespace="$3"
+    local timeout="${4:-30}"  # Default 30s timeout
+    
+    if [ -z "$resource_type" ] || [ -z "$resource_name" ] || [ -z "$namespace" ]; then
+        print_error "safe_delete_resource: Missing required parameters"
+        echo "Usage: safe_delete_resource <resource-type> <resource-name> <namespace> [timeout]"
+        return 1
+    fi
+    
+    # Check if resource exists
+    if ! oc get "$resource_type" "$resource_name" -n "$namespace" &>/dev/null; then
+        print_debug "Resource $resource_type/$resource_name does not exist in namespace $namespace"
+        return 0
+    fi
+    
+    print_info "Checking $resource_type '$resource_name' for finalizers..."
+    
+    # Get finalizers
+    local finalizers
+    finalizers=$(oc get "$resource_type" "$resource_name" -n "$namespace" -o jsonpath='{.metadata.finalizers}' 2>/dev/null || echo "[]")
+    
+    # Check if finalizers exist and are not empty
+    if [ "$finalizers" != "[]" ] && [ "$finalizers" != "" ] && [ "$finalizers" != "null" ]; then
+        print_warning "Found finalizers: $finalizers"
+        print_info "Removing finalizers before deletion..."
+        
+        if oc patch "$resource_type" "$resource_name" -n "$namespace" --type json \
+            -p='[{"op": "remove", "path": "/metadata/finalizers"}]' 2>&1; then
+            print_success "Finalizers removed"
+            sleep 2
+        else
+            print_warning "Failed to remove finalizers, attempting deletion anyway..."
+        fi
+    else
+        print_debug "No finalizers found"
+    fi
+    
+    # Delete resource
+    print_info "Deleting $resource_type '$resource_name'..."
+    if oc delete "$resource_type" "$resource_name" -n "$namespace" --timeout="${timeout}s" 2>&1; then
+        print_success "Resource deleted successfully"
+        return 0
+    else
+        print_warning "Deletion timed out or failed, attempting force delete..."
+    fi
+    
+    # Force delete if normal delete failed
+    if oc get "$resource_type" "$resource_name" -n "$namespace" &>/dev/null; then
+        print_warning "Resource still exists, forcing removal..."
+        
+        # Remove finalizers again (in case they were re-added)
+        oc patch "$resource_type" "$resource_name" -n "$namespace" --type json \
+            -p='[{"op": "remove", "path": "/metadata/finalizers"}]' 2>&1 || true
+        
+        # Force delete
+        oc delete "$resource_type" "$resource_name" -n "$namespace" --force --grace-period=0 2>&1 || true
+        sleep 2
+        
+        # Final check
+        if oc get "$resource_type" "$resource_name" -n "$namespace" &>/dev/null; then
+            print_error "Failed to delete $resource_type/$resource_name"
+            return 1
+        else
+            print_success "Resource forcefully removed"
+            return 0
+        fi
+    fi
+    
+    return 0
+}
+
+# Safe delete all resources of a type with finalizer handling
+# Usage: safe_delete_all_resources <resource-type> <namespace> [timeout]
+# Example: safe_delete_all_resources pvc rook-ceph 30
+safe_delete_all_resources() {
+    local resource_type="$1"
+    local namespace="$2"
+    local timeout="${3:-30}"  # Default 30s timeout
+    
+    if [ -z "$resource_type" ] || [ -z "$namespace" ]; then
+        print_error "safe_delete_all_resources: Missing required parameters"
+        echo "Usage: safe_delete_all_resources <resource-type> <namespace> [timeout]"
+        return 1
+    fi
+    
+    # Get list of resources
+    local resources
+    resources=$(oc get "$resource_type" -n "$namespace" -o name 2>/dev/null)
+    
+    if [ -z "$resources" ]; then
+        print_info "No $resource_type resources found in namespace $namespace"
+        return 0
+    fi
+    
+    local count
+    count=$(echo "$resources" | wc -l | tr -d ' ')
+    print_info "Found $count $resource_type resource(s) to delete"
+    
+    # Remove finalizers from all resources first
+    print_info "Removing finalizers from all $resource_type resources..."
+    for resource in $resources; do
+        oc patch "$resource" -n "$namespace" --type json \
+            -p='[{"op": "remove", "path": "/metadata/finalizers"}]' 2>&1 || true
+    done
+    sleep 2
+    
+    # Delete all resources
+    print_info "Deleting all $resource_type resources..."
+    if oc delete "$resource_type" --all -n "$namespace" --timeout="${timeout}s" 2>&1; then
+        print_success "All resources deleted"
+        return 0
+    else
+        print_warning "Some resources may not have been deleted, checking..."
+    fi
+    
+    # Force delete any remaining resources
+    resources=$(oc get "$resource_type" -n "$namespace" -o name 2>/dev/null)
+    if [ -n "$resources" ]; then
+        print_warning "Force deleting remaining resources..."
+        for resource in $resources; do
+            oc delete "$resource" -n "$namespace" --force --grace-period=0 2>&1 || true
+        done
+    fi
+    
+    print_success "Cleanup complete for $resource_type"
+    return 0
 }
 
 # =============================================================================

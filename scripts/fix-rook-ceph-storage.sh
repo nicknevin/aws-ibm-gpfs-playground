@@ -65,21 +65,55 @@ export KUBECONFIG
 # Check if cluster exists
 if ! oc get cephcluster rook-ceph -n ${NAMESPACE} &>/dev/null; then
     print_error "CephCluster 'rook-ceph' not found in namespace ${NAMESPACE}"
+    print_info "This script is for fixing existing installations."
+    print_info ""
+    print_info "For fresh installation, use:"
+    echo "  ./scripts/install-rook-ceph.sh ${CLUSTER_NAME}"
+    print_info ""
+    print_info "If you need to set up LSO, run:"
+    echo "  ansible-playbook -i hosts -e @<cluster-config>.yaml playbooks/dr-ceph.yml --tags lso1,ceph_disks"
     exit 1
 fi
 
 # Check if LSO PVs exist
 print_info "Checking for LSO PVs..."
-LSO_PV_COUNT=$(oc get pv --no-headers 2>/dev/null | grep -c "lso-sc" || echo "0")
+LSO_PV_COUNT=$(oc get pv --no-headers 2>&1 | grep "lso-sc" | wc -l | tr -d ' ')
+# Ensure LSO_PV_COUNT is a valid integer
+if ! [[ "$LSO_PV_COUNT" =~ ^[0-9]+$ ]]; then
+    LSO_PV_COUNT=0
+fi
 
 if [ "$LSO_PV_COUNT" -lt 3 ]; then
     print_error "Found only ${LSO_PV_COUNT} LSO PVs. Need at least 3."
     print_info "Please run the LSO setup first:"
     echo "  ansible-playbook -i hosts -e @dr-eun1b-cluster1.yaml playbooks/dr-ceph.yml --tags lso1,ceph_disks"
+    print_info ""
+    print_info "Debug: Checking all PVs..."
+    oc get pv -o wide 2>&1
+    print_info ""
+    print_info "Debug: Checking LocalVolume configuration..."
+    oc get localvolume -n openshift-local-storage local-block -o yaml 2>&1
+    print_info ""
+    print_info "Debug: Checking LSO operator pods..."
+    oc get pods -n openshift-local-storage 2>&1
     exit 1
 fi
 
 print_success "Found ${LSO_PV_COUNT} LSO PVs"
+
+# Check if nodes are labeled for LSO
+print_info "Checking if worker nodes have LSO label..."
+LABELED_NODES=$(oc get nodes -l cluster.ocs.openshift.io/openshift-storage -o name | wc -l | tr -d ' ')
+if [ "$LABELED_NODES" -lt 3 ]; then
+    print_warning "Only ${LABELED_NODES} nodes have LSO label. Labeling all worker nodes..."
+    for node in $(oc get nodes -l node-role.kubernetes.io/worker -o name); do
+        oc label $node cluster.ocs.openshift.io/openshift-storage="" --overwrite 2>&1 | grep -v "not labeled"
+        print_info "  Labeled: $(basename $node)"
+    done
+    print_success "All worker nodes labeled for LSO"
+else
+    print_success "All ${LABELED_NODES} worker nodes already labeled"
+fi
 
 # Get current cluster configuration
 print_info "Backing up current CephCluster configuration..."
@@ -100,22 +134,13 @@ fi
 
 echo ""
 print_info "Step 1: Deleting dependent resources first..."
-print_info "  Deleting CephBlockPools..."
-oc delete cephblockpool --all -n ${NAMESPACE} --wait=false 2>/dev/null || true
-print_info "  Deleting CephFilesystems..."
-oc delete cephfilesystem --all -n ${NAMESPACE} --wait=false 2>/dev/null || true
-print_info "  Deleting CephObjectStores..."
-oc delete cephobjectstore --all -n ${NAMESPACE} --wait=false 2>/dev/null || true
 
-print_info "Waiting 10 seconds for deletions to start..."
-sleep 10
+# Use common functions for safe deletion
+safe_delete_all_resources cephblockpool ${NAMESPACE} 15
+safe_delete_all_resources cephfilesystem ${NAMESPACE} 15
+safe_delete_all_resources cephobjectstore ${NAMESPACE} 15
 
-print_info "Removing finalizers from stuck resources..."
-for resource in cephblockpool cephfilesystem cephobjectstore; do
-    for item in $(oc get ${resource} -n ${NAMESPACE} -o name 2>/dev/null); do
-        oc patch ${item} -n ${NAMESPACE} --type merge -p '{"metadata":{"finalizers":[]}}' 2>/dev/null || true
-    done
-done
+print_success "All dependent resources removed"
 
 print_info "Step 2: Deleting CephCluster CR..."
 oc delete cephcluster rook-ceph -n ${NAMESPACE} --wait=false
