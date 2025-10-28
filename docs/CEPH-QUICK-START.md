@@ -6,15 +6,21 @@ This is a quick reference for installing Ceph storage on your OpenShift cluster.
 
 ### Option 1: Upstream Rook-Ceph (Recommended - No License Required)
 
+**Prerequisites**: Local Storage Operator (LSO) must be installed first!
+
 ```bash
-# 1. Prepare disks and install Local Storage Operator
+# 1. Prepare disks and install Local Storage Operator (REQUIRED)
 cd /home/nlevanon/workspace/DR/aws-ibm-gpfs-playground
 ansible-playbook -i hosts -e @dr-eun1b-cluster1.yaml playbooks/dr-ceph.yml --tags lso1,ceph_disks
 
-# 2. Run the automated installation script
+# 2. Verify LSO PVs are ready (should show 3 PVs)
+export KUBECONFIG=~/dr-playground/dr-eun1b-1/ocp_install_files/auth/kubeconfig
+oc get pv | grep lso-sc
+
+# 3. Run the automated installation script
 ./scripts/install-rook-ceph.sh dr-eun1b-1
 
-# Wait 30-50 minutes for installation to complete
+# Wait 15-30 minutes for installation to complete
 ```
 
 ### Option 2: OpenShift Data Foundation (Requires Red Hat Subscription)
@@ -209,16 +215,42 @@ oc get cephcluster -n rook-ceph  # OR storagecluster -n openshift-storage for OD
 oc delete pod -l app=rook-ceph-operator -n rook-ceph
 ```
 
-### Issue: "OSDs not starting"
+### Issue: "OSDs not starting" (OSD count 0)
 
-**Solution:**
+**Common Cause**: Device path mismatch or LSO not configured
+
+**Check the logs:**
 ```bash
-# Check if disks are available
+oc logs -n rook-ceph -l app=rook-ceph-osd-prepare | grep "skipping device"
+
+# If you see: "skipping device that does not match the device filter"
+# This means the CephCluster is configured for wrong device paths
+```
+
+**Solution 1: Verify LSO is installed**
+```bash
+# Should show 3+ PVs
+oc get pv | grep lso-sc
+
+# If no PVs found, install LSO first:
+ansible-playbook -i hosts -e @<cluster-config>.yaml playbooks/dr-ceph.yml --tags lso1,ceph_disks
+```
+
+**Solution 2: Reconfigure storage (if CephCluster already exists)**
+```bash
+# Use the fix script to reconfigure for LSO PVCs
+./scripts/fix-rook-ceph-storage.sh <cluster-name>
+```
+
+**Solution 3: Check disks on nodes**
+```bash
+# If LSO is installed but no PVs
 oc debug node/<node-name>
 chroot /host
 lsblk
 
-# Verify /dev/sde is present and not in use
+# Look for nvme1n1, nvme2n1 or similar
+# These should be 150-160GB disks
 ```
 
 ### Issue: "Monitors not forming quorum"

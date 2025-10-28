@@ -134,11 +134,28 @@ print_info "Checking if LSO (Local Storage Operator) PVs are available..."
 LSO_PV_COUNT=$(oc get pv --no-headers 2>/dev/null | grep -c "lso-sc" || echo "0")
 
 if [ "$LSO_PV_COUNT" -ge 3 ]; then
-    print_success "Found ${LSO_PV_COUNT} LSO PVs - using storageClassDeviceSets"
+    print_success "Found ${LSO_PV_COUNT} LSO PVs - using storageClassDeviceSets (PVC-based storage)"
     STORAGE_MODE="pvc"
 else
-    print_warning "No LSO PVs found - using raw devices (requires disks at /dev/disk/by-id/...)"
-    STORAGE_MODE="devices"
+    # Check if LSO LocalVolume exists (LSO is installed but PVs not ready yet)
+    if oc get localvolume -n openshift-local-storage local-block &>/dev/null; then
+        print_warning "LSO is installed but PVs not ready yet. Waiting 30 seconds..."
+        sleep 30
+        LSO_PV_COUNT=$(oc get pv --no-headers 2>/dev/null | grep -c "lso-sc" || echo "0")
+        if [ "$LSO_PV_COUNT" -ge 3 ]; then
+            print_success "Found ${LSO_PV_COUNT} LSO PVs after waiting - using storageClassDeviceSets"
+            STORAGE_MODE="pvc"
+        else
+            print_error "LSO is installed but no PVs found. Please check LSO configuration."
+            print_info "Expected: 3+ PVs with storageClassName 'lso-sc'"
+            print_info "Current: ${LSO_PV_COUNT} PVs found"
+            exit 1
+        fi
+    else
+        print_error "No LSO PVs found and LSO not installed."
+        print_info "Please run: ansible-playbook -i hosts -e @<cluster-config>.yaml playbooks/dr-ceph.yml --tags lso1,ceph_disks"
+        exit 1
+    fi
 fi
 
 cat > "${CLUSTER_YAML}" <<EOF
@@ -215,11 +232,6 @@ spec:
       limits:
         memory: "8Gi"
   storage:
-EOF
-
-# Add storage configuration based on mode
-if [ "$STORAGE_MODE" = "pvc" ]; then
-    cat >> "${CLUSTER_YAML}" <<'EOF'
     useAllNodes: true
     useAllDevices: false
     storageClassDeviceSets:
@@ -238,21 +250,6 @@ if [ "$STORAGE_MODE" = "pvc" ]; then
               accessModes:
                 - ReadWriteOnce
 EOF
-else
-    cat >> "${CLUSTER_YAML}" <<EOF
-    useAllNodes: false
-    useAllDevices: false
-    nodes:
-EOF
-    # Add nodes with device paths
-    for node in "${NODES[@]}"; do
-        cat >> "${CLUSTER_YAML}" <<EOF
-      - name: ${node}
-        devices:
-          - name: "/dev/disk/by-id/nvme-Amazon_Elastic_Block_Store_vol*"
-EOF
-    done
-fi
 
 print_success "Cluster configuration created at ${CLUSTER_YAML}"
 
